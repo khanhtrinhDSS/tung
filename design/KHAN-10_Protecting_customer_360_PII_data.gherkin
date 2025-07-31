@@ -1,0 +1,115 @@
+Feature: Encrypt PII columns in customer_360_raw table and store encryption key securely
+
+  As a data engineer,
+  I want to encrypt the PII columns (name, email, phone, zip) in the purgo_playground.customer_360_raw table,
+  so that PII data is protected and the encryption key is securely stored as a JSON file in the specified volume location.
+
+  Background:
+    Given the source table "purgo_playground.customer_360_raw" exists with columns:
+      | id | name | email | phone | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip |
+    And the Databricks workspace has write access to "/Volumes/agilisium_playground/purgo_playground/de_dq"
+    And the encryption algorithm is "AES-256-GCM"
+    And the encryption key must be randomly generated per run and saved as "encryption_key_<current_datetime>.json"
+    And the key file must be saved in "/Volumes/agilisium_playground/purgo_playground/de_dq"
+    And the encrypted columns must be stored as base64-encoded strings
+    And null or empty values in PII columns must remain unchanged (not encrypted)
+    And the output table must be named "purgo_playground.customer_360_raw_encrypted_<current_datetime>"
+    And if the output table already exists, it must be overwritten
+    And the clone table "purgo_playground.customer_360_raw_clone" must be dropped if it exists before cloning
+    And the clone table must be created as a replica of "purgo_playground.customer_360_raw"
+    And encryption must be applied at the column level for each value in the PII columns
+
+  Scenario: Drop and recreate the clone table before encryption
+    Given the table "purgo_playground.customer_360_raw_clone" exists
+    When the script is executed
+    Then the table "purgo_playground.customer_360_raw_clone" is dropped
+    And a new table "purgo_playground.customer_360_raw_clone" is created as a replica of "purgo_playground.customer_360_raw"
+
+  Scenario: Clone table does not exist before encryption
+    Given the table "purgo_playground.customer_360_raw_clone" does not exist
+    When the script is executed
+    Then a new table "purgo_playground.customer_360_raw_clone" is created as a replica of "purgo_playground.customer_360_raw"
+
+  Scenario Outline: Encrypt PII columns and write to output table
+    Given the table "purgo_playground.customer_360_raw_clone" contains the following row:
+      | id   | name         | email                | phone        | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip     |
+      | <id> | <name>       | <email>              | <phone>      | <company> | <job_title> | <address> | <city> | <state> | <country> | <industry> | <account_manager> | <creation_date> | <last_interaction_date> | <purchase_history> | <notes> | <zip> |
+    When the script is executed
+    Then the table "purgo_playground.customer_360_raw_encrypted_<current_datetime>" contains a row with:
+      | id   | name                | email                   | phone                | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip                |
+      | <id> | <encrypted_name>    | <encrypted_email>       | <encrypted_phone>    | <company> | <job_title> | <address> | <city> | <state> | <country> | <industry> | <account_manager> | <creation_date> | <last_interaction_date> | <purchase_history> | <notes> | <encrypted_zip>    |
+    And the columns "name", "email", "phone", "zip" are base64-encoded AES-256-GCM encrypted values if not null or empty
+    And the columns "name", "email", "phone", "zip" are unchanged if null or empty
+    And the encryption key is saved as "encryption_key_<current_datetime>.json" in "/Volumes/agilisium_playground/purgo_playground/de_dq"
+    And the key file contains the AES-256-GCM key in base64 format and metadata:
+      | key           | algorithm   | created_at              |
+      | <base64_key>  | AES-256-GCM | <current_datetime_iso>  |
+
+    Examples:
+      | id  | name         | email                | phone        | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip     | encrypted_name | encrypted_email | encrypted_phone | encrypted_zip | base64_key         | current_datetime_iso      |
+      | 1   | John Smith   | john@abc.com         | 1234567890   | ABC Inc | Manager   | 123 St  | NY   | NY    | USA     | Tech     | Alice           | 2024-07-30    | 2024-07-29            | PH1              | Note1 | 10001   | <enc_name1>    | <enc_email1>    | <enc_phone1>    | <enc_zip1>    | <key1>             | 2024-07-30T12:00:00Z      |
+      | 2   |              | jane@xyz.com         |             | XYZ LLC | Director  | 456 Ave | LA   | CA    | USA     | Finance  | Bob             | 2024-07-28    | 2024-07-27            | PH2              | Note2 |         |                | <enc_email2>    |                 |               | <key2>             | 2024-07-30T12:00:00Z      |
+      | 3   | null         | null                 | null         | DEF Ltd | Analyst   | 789 Rd  | SF   | CA    | USA     | Health   | Carol           | 2024-07-26    | 2024-07-25            | PH3              | Note3 | null    | null           | null            | null            | null          | <key3>             | 2024-07-30T12:00:00Z      |
+
+  Scenario: Error when unable to write encryption key file
+    Given the script does not have write permission to "/Volumes/agilisium_playground/purgo_playground/de_dq"
+    When the script attempts to save the encryption key file
+    Then the script fails with error message "Permission denied: Unable to write encryption key file to /Volumes/agilisium_playground/purgo_playground/de_dq"
+
+  Scenario: Error when source table does not exist
+    Given the table "purgo_playground.customer_360_raw" does not exist
+    When the script is executed
+    Then the script fails with error message "Source table purgo_playground.customer_360_raw does not exist"
+
+  Scenario: Error when encryption algorithm is not supported
+    Given the encryption algorithm is set to "DES"
+    When the script is executed
+    Then the script fails with error message "Unsupported encryption algorithm: DES. Only AES-256-GCM is supported."
+
+  Scenario: Validate output table schema matches input schema
+    Given the script is executed successfully
+    Then the output table "purgo_playground.customer_360_raw_encrypted_<current_datetime>" has the same schema as "purgo_playground.customer_360_raw"
+    And the data types of encrypted columns "name", "email", "phone", "zip" are string
+
+  Scenario: Validate null and empty values are not encrypted
+    Given the table "purgo_playground.customer_360_raw_clone" contains a row with:
+      | id | name | email | phone | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip |
+      | 4  |      |       |       | GHI     | Lead      | 101 St  | CHI  | IL    | USA     | Retail   | Dave            | 2024-07-25    | 2024-07-24            | PH4              | Note4 |     |
+    When the script is executed
+    Then the output table "purgo_playground.customer_360_raw_encrypted_<current_datetime>" contains a row with:
+      | id | name | email | phone | company | job_title | address | city | state | country | industry | account_manager | creation_date | last_interaction_date | purchase_history | notes | zip |
+      | 4  |      |       |       | GHI     | Lead      | 101 St  | CHI  | IL    | USA     | Retail   | Dave            | 2024-07-25    | 2024-07-24            | PH4              | Note4 |     |
+
+  Scenario: Validate encryption key file contains required metadata
+    Given the script is executed successfully
+    When the encryption key file "encryption_key_<current_datetime>.json" is saved
+    Then the file contains the following fields:
+      | key           | algorithm   | created_at              |
+      | <base64_key>  | AES-256-GCM | <current_datetime_iso>  |
+    And the "key" field is a 44-character base64 string (32 bytes AES-256 key)
+    And the "created_at" field is in ISO 8601 format
+
+  Scenario: Validate output table is overwritten if already exists
+    Given the table "purgo_playground.customer_360_raw_encrypted_<current_datetime>" already exists
+    When the script is executed
+    Then the table "purgo_playground.customer_360_raw_encrypted_<current_datetime>" is overwritten with new encrypted data
+
+  Scenario: Validate only PII columns are encrypted
+    Given the script is executed successfully
+    Then only the columns "name", "email", "phone", "zip" are encrypted in the output table
+    And all other columns retain their original values
+
+  Scenario: Validate encryption is deterministic per run but not across runs
+    Given the same input row is encrypted in two separate script executions with different keys
+    When comparing the encrypted values of "name", "email", "phone", "zip"
+    Then the encrypted values differ between runs
+
+  Scenario: Validate encryption is non-deterministic within a run for different values
+    Given two different input values for "name" in the same run
+    When the script is executed
+    Then the encrypted "name" values are different
+
+  Scenario: Validate error when unable to overwrite output table
+    Given the script does not have permission to overwrite "purgo_playground.customer_360_raw_encrypted_<current_datetime>"
+    When the script is executed
+    Then the script fails with error message "Permission denied: Unable to overwrite output table purgo_playground.customer_360_raw_encrypted_<current_datetime>"
